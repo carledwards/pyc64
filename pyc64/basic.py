@@ -225,7 +225,7 @@ class BasicInterpreter:
     def _tokenize(self, expression):
         """Converts a string expression into a list of tokens."""
         # Split expression into tokens, preserving quoted strings
-        quoted_string_tokens = re.findall(r'"[^"]*"|\S+', expression)
+        quoted_string_tokens = re.findall(r'"[^"]*"|\+|\-|\*|\/|\(|\)|\d+|[A-Za-z]\w*\$?(?:\(\d*\))?', expression)
         tokens = []
         for token in quoted_string_tokens:
             if len(token) > 1 and token.startswith('"') and token.endswith('"'):
@@ -246,9 +246,18 @@ class BasicInterpreter:
         while tokens and tokens[0] in ["+", "-"]:
             operator = tokens.pop(0)
             term = self._parse_term(tokens)
+
             if operator == "+":
+                if type(value) is str and type(term) is not str:
+                    raise BasicError("type mismatch")
+                if type(value) in [int, float] and type(term) not in [int, float]:
+                    raise BasicError("type mismatch")
+
                 value += term
             elif operator == "-":
+                # strings cannot be subtracted from each other
+                if type(value) is str or type(term) is str:
+                    raise BasicError("type mismatch")
                 value -= term
         return value
 
@@ -258,6 +267,11 @@ class BasicInterpreter:
         while tokens and tokens[0] in ["*", "/"]:
             operator = tokens.pop(0)
             factor = self._parse_factor(tokens)
+
+            # strings cannot be operated on
+            if type(value) is str or type(factor) is str:
+                raise BasicError("type mismatch")
+
             if operator == "*":
                 value *= factor
             elif operator == "/":
