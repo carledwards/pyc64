@@ -139,16 +139,23 @@ class BasicInterpreter:
 
     @staticmethod
     def _variables_get_internal_symbol_name(symbol, is_array):
+        variable_type = 'real'
+        if symbol.endswith('$'):
+            variable_type = 'str'
+            symbol = symbol[:-1]
+
         # limit to max two characters for identification
         if len(symbol) > 2:
             symbol = symbol[:2]
         else:
             symbol = symbol
-        
+
         if is_array:
-            return "_array_real_" + symbol
+            result = f'_array_{variable_type}_' + symbol
         else:
-            return "_var_real_" + symbol
+            result = f'_var_{variable_type}_' + symbol
+
+        return result
 
     def _variables_get_value(self, symbol, array_index):
         if symbol in self.symbols and array_index is None:
@@ -157,7 +164,7 @@ class BasicInterpreter:
         internal_symbol = self._variables_get_internal_symbol_name(symbol, True if array_index is not None else False)
         if internal_symbol not in self.symbols:
             # auto create if not found
-            self._variables_assignment(symbol, array_index, 0)
+            self._variables_assignment(symbol, array_index, '' if '_str_' in internal_symbol else 0)
         
         if array_index is not None:
             if array_index > len(self.symbols[internal_symbol])-1:
@@ -171,8 +178,14 @@ class BasicInterpreter:
         if value is None:
             raise BasicError("syntax")
 
+        internal_symbol = self._variables_get_internal_symbol_name(symbol, array_index is not None)
+
+        if '_str_' in internal_symbol and type(value) is not str:
+            raise BasicError("syntax")
+        if '_real_' in internal_symbol and not (type(value) in [int, float]):
+            raise BasicError("syntax")
+
         if array_index is not None:
-            internal_symbol = self._variables_get_internal_symbol_name(symbol, True)
             if internal_symbol not in self.symbols:
                 # auto create if not found
                 self._variables_dim_array(symbol, None)
@@ -182,7 +195,6 @@ class BasicInterpreter:
             
             self.symbols[internal_symbol][array_index] = value
         else:
-            internal_symbol = self._variables_get_internal_symbol_name(symbol, False)
             self.symbols[internal_symbol] = value
 
     def _variables_dim_array(self, symbol, size = None):
@@ -267,6 +279,9 @@ class BasicInterpreter:
         elif tokens[0].isalpha():  # variable name must begin with alpha
             variable_name = tokens.pop(0)
             while tokens and (tokens[0].isalpha() or tokens[0].isdigit()):
+                variable_name += tokens.pop(0)
+            # check if this is a string type
+            if tokens and tokens[0] == "$":
                 variable_name += tokens.pop(0)
             array_index = None
             if tokens and tokens[0] == "(":
@@ -449,10 +464,11 @@ class BasicInterpreter:
         elif cmd == "help":
             self.execute_help(cmd)
         else:
-            match = re.match(r"([a-zA-Z]+[0-9]*)(\([0-9]*\))?\s*=\s*(.+)", cmd)
+            match = re.match(r"([a-zA-Z]+[0-9]*)(\([0-9]*\))?(\$)?\s*=\s*(.+)", cmd)
             if match:
                 # variable assignment
-                symbol, arr_index, value = match.groups()
+                symbol, arr_index, string_identifier, value = match.groups()
+                symbol += string_identifier if string_identifier else ''
                 self._variables_assignment(symbol, self._evaluate_expression(arr_index), self._evaluate_expression(value))
                 return True
             else:
@@ -563,7 +579,8 @@ class BasicInterpreter:
         varname = cmd.strip()
         if not varname:
             raise BasicError("syntax")
-        self.symbols[varname] = self.interactive.do_get_command()
+        internal_varname = self._variables_get_internal_symbol_name(varname)
+        self.symbols[internal_varname] = self.interactive.do_get_command()
 
     def execute_goto(self, cmd):
         if cmd.startswith("gO"):
