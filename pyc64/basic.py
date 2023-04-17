@@ -359,12 +359,18 @@ class BasicInterpreter:
             if tokens[0] != ")":
                 raise ValueError("Expected ')' in expression.")
             tokens.pop(0)  # Consume ")"
-        elif tokens[0].isdigit():
+        elif tokens[0] == '-' or tokens[0].isdigit():
             value = 0
+            is_negative = False
+            if tokens[0] == '-':
+                tokens.pop(0)
+                is_negative = True
             while tokens and tokens[0].isdigit():
                 value = (value * 10) + int(tokens.pop(0))
+            if is_negative:
+                value = value * -1
         elif tokens[0].isalpha():  # variable name must begin with alpha
-            match = re.match(r"([a-zA-Z]+[0-9]*)(\$)?(\(\"?[a-zA-Z0-9]*\"?\))?(.+)?", ''.join(tokens))
+            match = re.match(r"([a-zA-Z]+[0-9]*)(\$)?(\(\"?[a-zA-Z0-9]*\"?\$?\))?(.+)?", ''.join(tokens))
             if not match:
                 raise BasicError('syntax')
 
