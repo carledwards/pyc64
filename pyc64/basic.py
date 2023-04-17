@@ -137,36 +137,42 @@ class BasicInterpreter:
     def running_program(self):
         return self.next_cmd_run_idx is not None
 
-    @staticmethod
-    def _variables_get_internal_symbol_name(symbol, is_array):
+    def _variables_get_internal_symbol_name(self, symbol):
+        match = re.match(r'([a-zA-Z][a-zA-Z0-9]*\$?)(\(\d*\))?', symbol)
+        if not match:
+            raise BasicError('syntax')
+        varname, array_index = match.groups()
+        if array_index:
+            # strip off the r'(d*)'
+            symbol = varname
+            array_index = self._evaluate_expression(array_index)
+
         variable_type = 'real'
-        if symbol.endswith('$'):
+        if varname.endswith('$'):
             variable_type = 'str'
-            symbol = symbol[:-1]
+            varname = varname[:-1]
 
         # limit to max two characters for identification
-        if len(symbol) > 2:
-            symbol = symbol[:2]
-        else:
-            symbol = symbol
+        varname = varname[:2] if len(varname) > 2 else varname
 
-        if is_array:
+        if array_index:
             result = f'_array_{variable_type}_' + symbol
         else:
             result = f'_var_{variable_type}_' + symbol
 
-        return result
+        return result, array_index
 
-    def _variables_get_value(self, symbol, array_index):
-        if symbol in self.symbols and array_index is None:
+    def _variables_get_value(self, symbol):
+        if symbol in self.symbols:
             return self.symbols[symbol]
 
-        internal_symbol = self._variables_get_internal_symbol_name(symbol, True if array_index is not None else False)
+        internal_symbol, array_index = self._variables_get_internal_symbol_name(symbol)
         if internal_symbol not in self.symbols:
             # auto create if not found
-            self._variables_assignment(symbol, array_index, '' if '_str_' in internal_symbol else 0)
+            self._variables_assignment(symbol, None)
         
         if array_index is not None:
+            # TODO fix this
             if array_index > len(self.symbols[internal_symbol])-1:
                 raise BasicError("bad subscript")
             
@@ -174,11 +180,16 @@ class BasicInterpreter:
         else:
             return self.symbols[internal_symbol]
 
-    def _variables_assignment(self, symbol, array_index, value):
-        if value is None:
-            raise BasicError("syntax")
+    def _variables_assignment(self, symbol, value):
+        internal_symbol, array_index = self._variables_get_internal_symbol_name(symbol)
 
-        internal_symbol = self._variables_get_internal_symbol_name(symbol, array_index is not None)
+        if value is None:
+            if '_str_' in internal_symbol:
+                value = ''
+            elif '_real_' in internal_symbol:
+                value = 0
+            else:
+                raise BasicError('internal consistency')
 
         if '_str_' in internal_symbol and type(value) is not str:
             raise BasicError("syntax")
@@ -189,11 +200,13 @@ class BasicInterpreter:
             if internal_symbol not in self.symbols:
                 # auto create if not found
                 self._variables_dim_array(symbol, None)
-            
+
+            # TODO fix this
             if array_index > len(self.symbols[internal_symbol])-1:
                 raise BasicError("bad subscript")
             
             self.symbols[internal_symbol][array_index] = value
+            print(self.symbols['_array_real_b'])
         else:
             self.symbols[internal_symbol] = value
 
@@ -206,7 +219,7 @@ class BasicInterpreter:
         
         # change the internal symbol name to not collide with a non-dim'ed
         # variable with the same name
-        internal_symbol = self._variables_get_internal_symbol_name(symbol, True)
+        internal_symbol, array_index = self._variables_get_internal_symbol_name(symbol)
 
         if internal_symbol in self.symbols:
             raise BasicError("REDIM'D ARRAY")
@@ -215,20 +228,67 @@ class BasicInterpreter:
         size = size + 1
         self.symbols[internal_symbol] = eval('[0]*'+str(size), self.symbols)
 
-    def _evaluate_expression(self, expression):
+    def _evaluate_expression(self, expression, must_be_variable_assignment=False):
         result = None
+        if must_be_variable_assignment:
+            match = re.match(r"([a-zA-Z]+[0-9]*)(\$)?(\([a-zA-Z0-9]*\))?\s*=\s*(.+)", expression)
+            if match:
+                # variable assignment
+                symbol, string_identifier, index_expression, value = match.groups()
+                symbol += string_identifier if string_identifier else ''
+                arr_index = None
+                if index_expression:
+                    arr_index = self._evaluate_expression(index_expression)
+                # add on the array index (if supplied)
+                symbol = f'{symbol}({arr_index})' if arr_index is not None else symbol
+                self._variables_assignment(symbol, self._evaluate_expression(value))
+                return None
+            else:
+                print("Syntax error:", expression, file=sys.stderr)
+                raise BasicError("syntax")
+
         if expression:
             tokens = self._tokenize(expression)
-            result = self._parse_expression(tokens.copy())
+
+            # determine if expression is a comparison or just return a value
+            op_idx = None
+            for operator in ['<=', '>=', '<>', '<', '>', '=']:
+                if operator in tokens:
+                    op_idx = tokens.index(operator)
+                    break
+
+            if op_idx:
+                if op_idx == 0 or (op_idx == len(tokens)-1):
+                    raise BasicError('syntax')
+                left_value = self._parse_expression(tokens[:op_idx].copy())
+                right_value = self._parse_expression(tokens[op_idx+1:].copy())
+                if operator == '<':
+                    result = -1 if left_value < right_value else 0
+                elif operator == '>':
+                    result = -1 if left_value > right_value else 0
+                elif operator == '<=':
+                    result = -1 if left_value <= right_value else 0
+                elif operator == '>=':
+                    result = -1 if left_value >= right_value else 0
+                elif operator == '<>':
+                    result = -1 if not (left_value == right_value) else 0
+                elif operator == '=':
+                    result = -1 if left_value == right_value else 0
+            else:
+                result = self._parse_expression(tokens.copy())
         return result
 
     def _tokenize(self, expression):
         """Converts a string expression into a list of tokens."""
         # Split expression into tokens, preserving quoted strings
-        quoted_string_tokens = re.findall(r'"[^"]*"|\+|\-|\*|\/|\(|\)|\d+|[A-Za-z]\w*\$?(?:\(\d*\))?', expression)
+        quoted_string_tokens = re.findall(r'"[^"]*"|<>|<=|>=|<|>|=|\+|-|\*|/|\(|\)|\d+|[A-Za-z]\w*\$?(?:\(\d*\))?', expression)
         tokens = []
         for token in quoted_string_tokens:
             if len(token) > 1 and token.startswith('"') and token.endswith('"'):
+                tokens.append(token)
+                continue
+
+            if token in ['>=', '<=', '<>']:
                 tokens.append(token)
                 continue
 
@@ -291,25 +351,30 @@ class BasicInterpreter:
             while tokens and tokens[0].isdigit():
                 value = (value * 10) + int(tokens.pop(0))
         elif tokens[0].isalpha():  # variable name must begin with alpha
-            variable_name = tokens.pop(0)
-            while tokens and (tokens[0].isalpha() or tokens[0].isdigit()):
-                variable_name += tokens.pop(0)
-            # check if this is a string type
-            if tokens and tokens[0] == "$":
-                variable_name += tokens.pop(0)
-            array_index = None
-            if tokens and tokens[0] == "(":
-                tokens.pop(0)  # Consume "("
-                array_index = self._parse_expression(tokens)
-                if tokens[0] != ")":
-                    raise ValueError("Expected ')' in expression.")
-                tokens.pop(0)  # Consume ")"
-            # check for peek function
+            match = re.match(r"([a-zA-Z]+[0-9]*)(\$)?(\([a-zA-Z0-9]*\))?(.+)?", ''.join(tokens))
+            if not match:
+                raise BasicError('syntax')
+
+            variable_name, string_type, index_expression, remainder = match.groups()
+            if variable_name:
+                [tokens.pop(0) for idx in range(len(variable_name))]
+            if string_type:
+                [tokens.pop(0) for idx in range(len(string_type))]
+            if index_expression:
+                [tokens.pop(0) for idx in range(len(index_expression))]
+
+            # check for the peek function (as it returns back a value)
             if variable_name in ['peek', 'pE']:
-                value = self.peek_func(array_index)
+                value = self.peek_func(self._evaluate_expression(index_expression))
             else:
-                # get variable with the name
-                value = self._variables_get_value(variable_name, array_index)
+                # add on the string_type (if available)
+                if string_type:
+                    variable_name += string_type
+                # add on the index (if available)
+                if index_expression:
+                    variable_name += '(' + str(self._evaluate_expression(index_expression)) + ')'
+                value = self._variables_get_value(variable_name)
+                # value = self._variables_get_value(variable_name + (index if index else ''))
         elif tokens[0].startswith('"') and tokens[0].endswith('"'):
             value = tokens.pop(0)[1:-1]
         else:
@@ -478,16 +543,7 @@ class BasicInterpreter:
         elif cmd == "help":
             self.execute_help(cmd)
         else:
-            match = re.match(r"([a-zA-Z]+[0-9]*)(\([0-9]*\))?(\$)?\s*=\s*(.+)", cmd)
-            if match:
-                # variable assignment
-                symbol, arr_index, string_identifier, value = match.groups()
-                symbol += string_identifier if string_identifier else ''
-                self._variables_assignment(symbol, self._evaluate_expression(arr_index), self._evaluate_expression(value))
-                return True
-            else:
-                print("Syntax error:", cmd, file=sys.stderr)
-                raise BasicError("syntax")
+            self._evaluate_expression(cmd, True)
         return True
 
     def execute_help(self, cmd):
@@ -554,7 +610,7 @@ class BasicInterpreter:
                         start += step
 
             iterator = iter(frange(start, to, step))
-            internal_varname = self._variables_get_internal_symbol_name(varname, False)
+            internal_varname, array_index = self._variables_get_internal_symbol_name(varname)
             self.forloops[internal_varname] = (self.next_cmd_run_idx, iterator)
             self.symbols[internal_varname] = next(iterator)
         else:
@@ -566,7 +622,7 @@ class BasicInterpreter:
         elif cmd.startswith("next"):
             cmd = cmd[4:]
         varname = cmd.strip()
-        internal_varname = self._variables_get_internal_symbol_name(varname, False)
+        internal_varname, array_index = self._variables_get_internal_symbol_name(varname)
         if not self.running_program:
             raise BasicError("illegal direct")  # we only support for loops in a program (with line numbers), not on the screen
         if not varname:
@@ -593,7 +649,7 @@ class BasicInterpreter:
         varname = cmd.strip()
         if not varname:
             raise BasicError("syntax")
-        internal_varname = self._variables_get_internal_symbol_name(varname)
+        internal_varname, array_index = self._variables_get_internal_symbol_name(varname)
         self.symbols[internal_varname] = self.interactive.do_get_command()
 
     def execute_goto(self, cmd):
@@ -888,60 +944,25 @@ class BasicInterpreter:
 
             raise GotoCmdException(0 if start is None else self.program_line_idx_to_cmd_idx[self.program_lines.index(start)])
 
-    def _parse_if_condition(self, if_condition):
-        operators = ['<','>','<=','>=','=']
-        operator = None
-        tokens = None
-        for operator in operators:
-            tokens = if_condition.split(operator)
-            if len(tokens) == 2:
-                break
-
-        if len(tokens) < 1 or len(tokens) > 2:
-            raise BasicError('syntax')
-
-        result = False
-        if len(tokens) == 1:
-            result = self._evaluate_expression(tokens[0])
-            if result:
-                result = True
-            else:
-                result = False
-        else:
-            left_value = self._evaluate_expression(tokens[0])
-            right_value = self._evaluate_expression(tokens[1])
-            if operator == '<':
-                result = left_value < right_value 
-            elif operator == '>':
-                result = left_value > right_value 
-            elif operator == '<=':
-                result = left_value <= right_value 
-            elif operator == '>=':
-                result = left_value >= right_value 
-            elif operator == '=':
-                result = left_value == right_value 
-
-        return result
-
     def execute_if(self, cmd):
-        match = re.match(r"if(.+)then(.+)$", cmd)
+        match = re.match(r"if(.+)\s*(then|goto)\s*(.+)$", cmd)
         if match:
-            condition, then = match.groups()
+            condition, verb, action = match.groups()
             condition = self._evaluate_expression(condition)
             if condition:
-                return self.execute_cmd(then, recursive=True)
-        else:
-            # perhaps if .. goto .. form?
-            match = re.match(r"if(.+)goto\s+(\S+)$", cmd)
-            if not match:
-                raise BasicError("syntax")
-            condition, line = match.groups()
-            condition = self._evaluate_expression(condition)
-            if condition:
-                line = self._evaluate_expression(line)   # allows jumptables via GOTO VAR
-                if line not in self.program:
-                    raise BasicError("undef'd statement")
-                raise GotoCmdException(self.program_line_idx_to_cmd_idx[self.program_lines.index(line)])
+                if action[0].isdigit():
+                    # can be THEN or GOTO
+                    try:
+                        line = int(action)
+                        if line not in self.program:
+                            raise BasicError("undef'd statement")
+                        raise GotoCmdException(self.program_line_idx_to_cmd_idx[self.program_lines.index(line)])
+                    except ValueError:
+                        raise BasicError('syntax')
+                else:
+                    if verb == "goto":
+                        raise BasicError('syntax')
+                    return self.execute_cmd(action, recursive=True)
         return True
 
     def execute_read(self, cmd):
@@ -952,7 +973,7 @@ class BasicInterpreter:
         varname = cmd.strip()
         if ',' in varname:
             raise BasicError("syntax")
-        internal_varname = self._variables_get_internal_symbol_name(varname, None)
+        internal_varname, array_index = self._variables_get_internal_symbol_name(varname)
         value = self.get_next_data()
         if value is None:
             raise BasicError("out of data")
@@ -1064,3 +1085,4 @@ class BasicInterpreter:
             self.stop_running_program()
         else:
             self.execute_cmd(self.cmd_lines[self.next_cmd_run_idx])
+
